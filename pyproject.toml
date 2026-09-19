@@ -40,6 +40,11 @@ dependencies = [
     "tree-sitter-rust>=0.23",
     "tree-sitter-java>=0.23",
     "tree-sitter-c-sharp>=0.23",
+    # Elixir has no dedicated def/module AST nodes, so `indexer/chunk_elixir.py`
+    # matches boundaries on the target text of generic `call` nodes. The wheel
+    # only requires tree-sitter under its `core` extra, so it does not fight
+    # the <0.26 cap above.
+    "tree-sitter-elixir>=0.3.5",
     "watchdog>=4.0",
     # Upper bound is deliberate. mcp 2.0.0 removed the decorator registration API
     # (Server.list_tools / Server.call_tool), so an unbounded "mcp>=1.0" resolves to 2.x

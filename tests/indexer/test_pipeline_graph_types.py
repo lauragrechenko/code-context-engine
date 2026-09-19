@@ -16,7 +16,7 @@ from context_engine.storage.graph_store import GraphStore
 
 
 @pytest.mark.asyncio
-async def test_markdown_fallback_chunk_is_module_not_class(tmp_path):
+async def test_markdown_chunk_is_doc_not_class(tmp_path):
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
     (project_dir / "README.md").write_text(
@@ -41,7 +41,7 @@ async def test_markdown_fallback_chunk_is_module_not_class(tmp_path):
         f"markdown chunks should not be NodeType.CLASS, got: {md_classes}"
     )
 
-    # The chunk should land as MODULE (the chunker's fallback type).
-    modules = await graph.get_nodes_by_type(NodeType.MODULE)
-    md_modules = [n for n in modules if n.file_path == "README.md"]
-    assert len(md_modules) >= 1, "markdown chunk missing as MODULE node"
+    # Markdown is chunked by heading section, so each section lands as DOC.
+    docs = await graph.get_nodes_by_type(NodeType.DOC)
+    md_docs = [n for n in docs if n.file_path == "README.md"]
+    assert len(md_docs) >= 1, "markdown section missing as DOC node"

@@ -191,3 +191,46 @@ def test_chunk_still_works_without_imports():
     chunker = Chunker()
     chunks = chunker.chunk(source, file_path="hello.py", language="python")
     assert len(chunks) == 1
+
+
+def test_oversized_fallback_chunk_is_windowed(chunker):
+    # An unparsed language used to become one whole-file chunk whose vector was
+    # built from its first ~40 lines while its metadata claimed the whole file.
+    source = "\n".join(f"key_{n}: value number {n}" for n in range(400))
+    chunks = chunker.chunk(source, file_path="big.yaml", language="yaml")
+    assert len(chunks) > 1
+    assert all(len(c.content) <= 1_500 for c in chunks)
+    assert all(c.chunk_type == ChunkType.MODULE for c in chunks)
+
+
+def test_windows_cover_the_whole_source_and_overlap(chunker):
+    lines = [f"line {n}" for n in range(500)]
+    chunks = chunker.chunk("\n".join(lines), file_path="big.txt", language="plaintext")
+    covered = set()
+    for chunk in chunks:
+        covered.update(range(chunk.start_line, chunk.end_line + 1))
+    assert covered == set(range(1, len(lines) + 1))
+    assert chunks[1].start_line <= chunks[0].end_line, "windows must overlap"
+    assert [c.metadata["part"] for c in chunks] == [(n + 1, len(chunks)) for n in range(len(chunks))]
+
+
+def test_window_line_numbers_match_their_content(chunker):
+    lines = [f"line {n}" for n in range(500)]
+    chunks = chunker.chunk("\n".join(lines), file_path="big.txt", language="plaintext")
+    for chunk in chunks:
+        assert chunk.content.split("\n")[0] == lines[chunk.start_line - 1]
+        assert chunk.content.split("\n")[-1] == lines[chunk.end_line - 1]
+
+
+def test_a_single_line_longer_than_the_budget_is_still_split(chunker):
+    # Minified blobs have no line to cut at, and leaving them whole would put
+    # the storage truncation limit back in play.
+    chunks = chunker.chunk("x" * 6_000, file_path="min.json", language="json")
+    assert len(chunks) == 4
+    assert "".join(c.content for c in chunks) == "x" * 6_000
+    assert all(c.start_line == 1 and c.end_line == 1 for c in chunks)
+
+
+def test_small_chunks_are_left_alone(chunker):
+    chunks = chunker.chunk(PYTHON_CODE, file_path="calc.py", language="python")
+    assert all("part" not in c.metadata for c in chunks)

@@ -677,7 +677,10 @@ async def _run_indexing_locked(
                         node_type = _CHUNK_TO_NODE_TYPE.get(
                             chunk.chunk_type, NodeType.MODULE
                         )
-                        node_name = (
+                        # Chunkers that know the language name their symbol
+                        # outright; the slicing below is a guess that yields
+                        # "def format_status" on anything it was not tuned for.
+                        node_name = chunk.metadata.get("symbol") or (
                             chunk.content.split("(")[0].split(":")[-1].strip()
                             if "(" in chunk.content
                             else chunk.id

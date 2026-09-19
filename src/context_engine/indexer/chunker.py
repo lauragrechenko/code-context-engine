@@ -1,6 +1,7 @@
 """AST-aware code chunking using tree-sitter."""
 import hashlib
 import threading
+from bisect import bisect_right
 
 import tree_sitter_python as tspython
 import tree_sitter_javascript as tsjavascript
@@ -10,9 +11,20 @@ import tree_sitter_go as tsgo
 import tree_sitter_rust as tsrust
 import tree_sitter_java as tsjava
 import tree_sitter_c_sharp as tscsharp
+import tree_sitter_elixir as tselixir
 from tree_sitter import Language, Parser
 
+from context_engine.indexer.chunk_elixir import chunk_elixir, elixir_imports
+from context_engine.indexer.chunk_markdown import markdown_sections
 from context_engine.models import Chunk, ChunkType
+
+# The embedding model caps at 512 tokens — about 1,690 chars at the 3.3
+# chars/token this codebase assumes (Chunk._CHARS_PER_TOKEN_CODE). Anything
+# longer is embedded only in part, so a 64 KB whole-file chunk gets a vector
+# built from its first 40 lines while its metadata claims the whole file.
+# Oversized chunks are therefore split into overlapping windows.
+_MAX_EMBED_CHARS = 1_500
+_OVERLAP_CHARS = 200
 
 _FUNCTION_TYPES = {
     "function_definition", "function_declaration",  # Python, PHP, JS
@@ -55,7 +67,44 @@ _LANGUAGES = {
     "rust": Language(tsrust.language()),
     "java": Language(tsjava.language()),
     "csharp": Language(tscsharp.language()),
+    "elixir": Language(tselixir.language()),
 }
+
+
+def _line_starts(src_bytes: bytes) -> list[int]:
+    """Byte offset of every line start, so a byte span can be given line numbers.
+
+    Built once per file: counting newlines per chunk would be quadratic on the
+    files that produce the most chunks.
+    """
+    starts = [0]
+    index = src_bytes.find(b"\n")
+    while index != -1:
+        starts.append(index + 1)
+        index = src_bytes.find(b"\n", index + 1)
+    return starts
+
+
+def _line_of(line_starts: list[int], offset: int) -> int:
+    return bisect_right(line_starts, offset)
+
+
+def _units(content: str, start_line: int) -> list[tuple[str, int]]:
+    """Split content into `(text, source line)` windowing units.
+
+    Lines are the natural unit, but a single line longer than the budget (a
+    minified blob, a long data literal) has to be cut mid-line or it would
+    still overflow the embedder.
+    """
+    units: list[tuple[str, int]] = []
+    for offset, line in enumerate(content.split("\n")):
+        number = start_line + offset
+        if len(line) <= _MAX_EMBED_CHARS:
+            units.append((line, number))
+            continue
+        for position in range(0, len(line), _MAX_EMBED_CHARS):
+            units.append((line[position:position + _MAX_EMBED_CHARS], number))
+    return units
 
 
 class Chunker:
@@ -84,9 +133,11 @@ class Chunker:
         return parser
 
     def chunk(self, source: str, file_path: str, language: str) -> list[Chunk]:
+        if language == "markdown":
+            return self._split_oversize(self._markdown_chunks(source, file_path))
         parser = self._get_parser(language)
         if parser is None:
-            return [self._fallback_chunk(source, file_path, language)]
+            return self._split_oversize([self._fallback_chunk(source, file_path, language)])
         # tree-sitter parses the utf-8 BYTES and reports byte offsets.
         # Encode once and slice the bytes — slicing the original str with
         # byte offsets silently garbles every chunk after the first
@@ -94,10 +145,112 @@ class Chunker:
         src_bytes = source.encode("utf-8")
         tree = parser.parse(src_bytes)
         chunks = []
-        self._walk(tree.root_node, src_bytes, file_path, language, chunks)
+        if language == "elixir":
+            self._walk_elixir(tree.root_node, src_bytes, file_path, chunks)
+        else:
+            self._walk(tree.root_node, src_bytes, file_path, language, chunks)
         if not chunks:
-            return [self._fallback_chunk(source, file_path, language)]
-        return chunks
+            chunks = [self._fallback_chunk(source, file_path, language)]
+        return self._split_oversize(chunks)
+
+    def _walk_elixir(self, root, src_bytes, file_path, chunks) -> None:
+        line_starts = _line_starts(src_bytes)
+
+        def emit(start: int, end: int, chunk_type: ChunkType, symbol: str) -> None:
+            content = src_bytes[start:end].decode("utf-8", errors="replace").rstrip()
+            if not content.strip():
+                return
+            # Measure the end line from the content that is kept, not from the
+            # raw span: a span runs up to the next item, so the blank lines
+            # rstrip drops would otherwise be reported as covered.
+            last_byte = start + len(content.encode("utf-8")) - 1
+            chunk = self._make_chunk(
+                content, file_path, _line_of(line_starts, start),
+                _line_of(line_starts, max(start, last_byte)), "elixir", chunk_type,
+            )
+            chunk.metadata["symbol"] = symbol
+            chunks.append(chunk)
+
+        chunk_elixir(root, src_bytes, emit, _MAX_EMBED_CHARS)
+
+    def _markdown_chunks(self, source: str, file_path: str) -> list[Chunk]:
+        lines = source.split("\n")
+        chunks: list[Chunk] = []
+        for start, end, heading in markdown_sections(source):
+            content = "\n".join(lines[start:end + 1]).rstrip()
+            if not content.strip():
+                continue
+            # Sections run to the line before the next heading, so the end line
+            # comes from the content kept rather than from that boundary.
+            chunk = self._make_chunk(
+                content, file_path, start + 1, start + content.count("\n") + 1,
+                "markdown", ChunkType.DOC,
+            )
+            chunk.metadata["heading"] = heading
+            chunks.append(chunk)
+        return chunks or [self._fallback_chunk(source, file_path, "markdown")]
+
+    def _split_oversize(self, chunks: list[Chunk]) -> list[Chunk]:
+        out: list[Chunk] = []
+        for chunk in chunks:
+            if len(chunk.content) <= _MAX_EMBED_CHARS:
+                out.append(chunk)
+            else:
+                out.extend(self._windows(chunk))
+        return out
+
+    def _windows(self, chunk: Chunk) -> list[Chunk]:
+        """Cut one oversized chunk into overlapping windows within the budget.
+
+        Windows overlap so a definition split across the seam is still whole in
+        one of them. Each window keeps the true source line range it covers.
+        """
+        units = _units(chunk.content, chunk.start_line)
+        spans: list[tuple[int, int]] = []
+        start = 0
+        while start < len(units):
+            end, size = start, 0
+            while end < len(units) and (
+                end == start or size + len(units[end][0]) + 1 <= _MAX_EMBED_CHARS
+            ):
+                size += len(units[end][0]) + 1
+                end += 1
+            spans.append((start, end))
+            if end >= len(units):
+                break
+            back, overlap = end - 1, 0
+            while back > start and overlap + len(units[back][0]) + 1 <= _OVERLAP_CHARS:
+                overlap += len(units[back][0]) + 1
+                back -= 1
+            start = max(back + 1, start + 1)
+
+        heading = chunk.metadata.get("heading")
+        parts: list[Chunk] = []
+        for index, (first, last) in enumerate(spans):
+            body = "\n".join(text for text, _ in units[first:last])
+            # A later window opens mid-document, so repeat the heading path —
+            # otherwise the fragment reads as belonging to nothing.
+            if index and heading:
+                body = f"{heading}\n{body}"
+            part = self._make_chunk(
+                body, chunk.file_path, units[first][1], units[last - 1][1],
+                chunk.language, chunk.chunk_type, salt=str(index),
+            )
+            part.metadata.update(chunk.metadata)
+            part.metadata["part"] = (index + 1, len(spans))
+            parts.append(part)
+        return parts
+
+    def _make_chunk(
+        self, content, file_path, start_line, end_line, language, chunk_type, *, salt="",
+    ) -> Chunk:
+        chunk_id = hashlib.sha256(
+            f"{file_path}:{start_line}:{end_line}:{salt}:{content[:100]}".encode()
+        ).hexdigest()[:16]
+        return Chunk(
+            id=chunk_id, content=content, chunk_type=chunk_type,
+            file_path=file_path, start_line=start_line, end_line=end_line, language=language,
+        )
 
     def _walk(self, node, src_bytes, file_path, language, chunks):
         if node.type in _FUNCTION_TYPES:
@@ -108,15 +261,9 @@ class Chunker:
             self._walk(child, src_bytes, file_path, language, chunks)
 
     def _node_to_chunk(self, node, src_bytes, file_path, language, chunk_type):
-        content = _node_text(src_bytes, node)
-        start_line = node.start_point.row + 1
-        end_line = node.end_point.row + 1
-        chunk_id = hashlib.sha256(
-            f"{file_path}:{start_line}:{end_line}:{content[:100]}".encode()
-        ).hexdigest()[:16]
-        return Chunk(
-            id=chunk_id, content=content, chunk_type=chunk_type,
-            file_path=file_path, start_line=start_line, end_line=end_line, language=language,
+        return self._make_chunk(
+            _node_text(src_bytes, node), file_path,
+            node.start_point.row + 1, node.end_point.row + 1, language, chunk_type,
         )
 
     def chunk_with_imports(
@@ -134,6 +281,10 @@ class Chunker:
         # never the str (multi-byte chars shift str indices).
         src_bytes = source.encode("utf-8")
         tree = parser.parse(src_bytes)
+        if language == "elixir":
+            # alias/import/require/use are `call` nodes, so _IMPORT_TYPES
+            # cannot see them — see chunk_elixir for why.
+            return list(dict.fromkeys(elixir_imports(tree.root_node, src_bytes)))
         imports: list[str] = []
         self._walk_imports(tree.root_node, src_bytes, language, imports)
         return list(dict.fromkeys(imports))  # deduplicate while preserving order
