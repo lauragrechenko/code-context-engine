@@ -1,6 +1,8 @@
 # Spec: real Elixir and markdown chunking for CCE
 
-Status: **draft for review — nothing implemented**
+Status: **implemented** on branch `elixir-markdown-chunking` (`1a8c155`),
+fork-only by decision — not offered upstream. §9 records where the build
+departed from this plan.
 Target: fork `lauragrechenko/code-context-engine` @ 0.4.26 (`7507115`)
 Measured against: `crypto-key-enclave` (363 `.ex`/`.exs`, 2.6 MB; 17 `.md`, 368 KB)
 Date: 2026-09-19
@@ -394,14 +396,62 @@ PyPI; reindex.
 
 ---
 
-## 8. Decisions needed before implementation
+## 8. Decisions taken
 
-1. **Window 1,500 / overlap 200** — accept, or trade recall for chunk count?
-2. **Markdown without `tree-sitter-markdown`** (§2.2) — accept the 25-line
-   splitter, or pay for the grammar?
-3. **Upstream or fork-only?** codegraph fixes are fork-only by standing rule.
-   CCE is a different upstream (`elara-labs/code-context-engine`) and §2.3
-   (windowing) plus the pipeline naming fix are general-purpose, not
-   Elixir-specific — worth a PR, or keep everything private?
-4. **`scripts/index-health.py` home** — repo `scripts/` (untracked today) or
-   `~/.local/bin/` beside `cce-reindex`? Step 6.4 adds a check either way.
+1. **Window 1,500 / overlap 200** — kept as specified.
+2. **Markdown without `tree-sitter-markdown`** — kept; no new grammar.
+3. **Fork-only.** Not offered upstream to `elara-labs/code-context-engine`,
+   including the general-purpose windowing and pipeline naming fix.
+4. **`scripts/index-health.py`** stays in the repo's `scripts/`, still
+   untracked. It gained the line-coverage check from step 6.4.
+
+---
+
+## 9. Where the build departed from this plan
+
+Four things this spec did not anticipate, all found while implementing:
+
+**Attributes needed a rule of their own.** §2.1 R4 said a run of comments and
+attributes attaches to the definition below. Applied literally, `@moduledoc`
+and every directive attach too, so the preamble collapsed to two lines and the
+module's own docs travelled into its first function. The build splits module
+attributes: only documentation and contract attributes (`DOC_ATTRS` — `@doc`,
+`@spec`, `@impl`, `@typedoc`, `@tag`, …) move with the definition below.
+`@moduledoc`, `@behaviour` and configuration constants stay where they were
+written, and constants sitting between two definitions become their own chunk
+rather than being dropped.
+
+**The file root is walked as a module body.** §2.1 walked only top-level
+`defmodule` nodes, which silently skipped every top-level statement in a script
+that also defines a helper module — `config/runtime.exs` lost 135 lines that
+way. `chunk_elixir` now walks the root with the same code path, labelling
+file-level chunks `(script)`.
+
+**Line numbers come from the kept content.** Spans run up to the start of the
+next item, so a chunk's raw span includes the blank lines between them.
+Reporting the span's end line claimed coverage of lines the chunk does not
+contain, which is the same class of lie the whole patch exists to remove.
+
+**One existing test changed.** `test_pipeline_graph_types.py` asserted markdown
+lands as `NodeType.MODULE` — the fallback type. Markdown sections are `DOC`
+now, which is what that test was reaching for.
+
+### Measured after the build
+
+| | spec projected | shipped |
+|---|---|---|
+| Elixir chunks | 4,896 | **4,878** |
+| Elixir coverage | 98.5% of bytes | **99.28% of non-blank lines** |
+| markdown | 523 chunks, 99.9% | **508 chunks, 100%** |
+| parse errors | 0 | **0** |
+| chunks over the embed budget | 0 | **0** |
+| chunk text identical to source | — | **all 4,878** |
+
+The 482 lines still uncovered are the lone `end` of each container that was
+recursed into — the line closing a `describe` whose tests became chunks.
+
+CCE suite: 1,162 passed, 1 skipped. `ruff check src tests` clean. 22 new tests
+cover the boundary rules, clause merging and its cap, guards, nested modules,
+ExUnit blocks, scripts, attribute placement, multibyte source, directive
+imports, markdown fences and headings, windowing, and a 50-file 8-thread
+concurrency case guarding the issue #113 failure class.
