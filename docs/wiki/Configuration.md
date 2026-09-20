@@ -73,7 +73,12 @@ indexer:
     - dist
     - coverage
     - "*.generated.ts"   # Glob patterns work too
+    - /storage           # Leading slash: only the top-level storage/, not lib/app/storage/
 ```
+
+Entries are merged with the built-in defaults, not replacing them. A bare name
+matches a directory or file of that name at any depth; a leading `/` anchors it
+to the project root.
 
 ---
 

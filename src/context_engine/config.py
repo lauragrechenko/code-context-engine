@@ -39,8 +39,11 @@ DEFAULT_IGNORE = [
     # Package locks (huge, not useful)
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "composer.lock", "poetry.lock",
-    # Storage / logs
-    "storage", "logs", "tmp", "temp",
+    # Storage / logs. A leading `/` anchors the name to the project root
+    # (gitignore-style, see indexer/ignorefile.py `IgnoreNames`): Laravel's
+    # top-level `storage/` is runtime output, but `lib/app/storage/` is
+    # source and must still be indexed.
+    "/storage", "logs", "tmp", "temp",
 ]
 
 

@@ -23,13 +23,53 @@ diminishing returns):
 Users who need full gitignore semantics can add `pathspec` to their
 project and wire a custom matcher; this module covers the common case
 without a third-party dependency.
+
+`IgnoreNames` is the other, older filter: the name-only `indexer.ignore`
+list from config (`DEFAULT_IGNORE` plus the user's additions). It matches
+whole path components, not globs, and is the one place a leading `/` means
+something — see the class.
 """
 from __future__ import annotations
 
 import fnmatch
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 CCEIGNORE_FILENAME = ".cceignore"
+
+
+class IgnoreNames:
+    """The name-only `indexer.ignore` list, split once for matching.
+
+    An entry with a leading `/` matches only a direct child of the project
+    root, as in gitignore: `/storage` skips Laravel's top-level `storage/`
+    but not a source directory such as `lib/app/storage/`. Every other
+    entry matches a path component at any depth (`node_modules` nested in
+    a monorepo package, `bin/` under each .NET project).
+    """
+
+    __slots__ = ("anywhere", "root_only")
+
+    def __init__(self, entries: Iterable[str]) -> None:
+        anywhere: set[str] = set()
+        root_only: set[str] = set()
+        for entry in entries:
+            if entry.startswith("/"):
+                if entry[1:]:
+                    root_only.add(entry[1:])
+            elif entry:
+                anywhere.add(entry)
+        self.anywhere: frozenset[str] = frozenset(anywhere)
+        self.root_only: frozenset[str] = frozenset(root_only)
+
+    def matches(self, rel_parts: Sequence[str]) -> bool:
+        """True if the path with these components, relative to the project
+        root, is ignored — by its own name or by an ancestor's."""
+        if not rel_parts:
+            return False
+        if rel_parts[0] in self.root_only:
+            return True
+        return any(part in self.anywhere for part in rel_parts)
 
 
 def load_ignore_patterns(project_dir: Path) -> list[str]:

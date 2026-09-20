@@ -199,18 +199,24 @@ def _iter_project_files(
 
     `cceignore_patterns` (typically loaded from `.cceignore`) supplements
     the name-only `ignore_set` with gitignore-style globs evaluated
-    against the path relative to `root`.
+    against the path relative to `root`. An `ignore_set` entry with a
+    leading `/` only matches at `root` (see `IgnoreNames`).
     """
     from context_engine.indexer.secrets import is_secret_file as _is_secret_file
+    from context_engine.indexer.ignorefile import IgnoreNames
     from context_engine.indexer.ignorefile import matches_any as _ignore_matches
+    names = IgnoreNames(ignore_set)
     patterns = cceignore_patterns or []
     seen: set[Path] = set()
 
-    def _rel(entry: Path) -> str:
+    def _rel_parts(entry: Path) -> tuple[str, ...]:
         try:
-            return str(entry.relative_to(root)).replace("\\", "/")
+            return entry.relative_to(root).parts
         except ValueError:
-            return entry.name
+            return (entry.name,)
+
+    def _rel(entry: Path) -> str:
+        return "/".join(_rel_parts(entry))
 
     def walk(directory: Path) -> Iterable[Path]:
         try:
@@ -218,7 +224,7 @@ def _iter_project_files(
         except (PermissionError, OSError):
             return
         for entry in entries:
-            if entry.name in ignore_set:
+            if names.matches(_rel_parts(entry)):
                 continue
             if entry.is_symlink():
                 continue
@@ -392,12 +398,13 @@ async def _run_indexing_locked(
             # pipeline — it must enforce the same filters as the directory
             # walk (_iter_project_files), or saving `.env.production` in a
             # watched project gets it read and indexed.
+            from context_engine.indexer.ignorefile import IgnoreNames
             from context_engine.indexer.secrets import is_secret_file
             rel = str(target.relative_to(project_dir))
             rel_posix = rel.replace("\\", "/")
             if target.suffix in _SKIP_EXTENSIONS:
                 file_iter = []
-            elif target.name in ignore_set:
+            elif IgnoreNames(ignore_set).matches(target.relative_to(project_dir).parts):
                 if log_fn:
                     log_fn(f"  [skip] {rel} (ignored)")
                 result.skipped_files.append(rel)

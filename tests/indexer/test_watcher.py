@@ -1,7 +1,7 @@
 # tests/indexer/test_watcher.py
 import asyncio
 import pytest
-from context_engine.indexer.watcher import FileWatcher
+from context_engine.indexer.watcher import FileWatcher, _DebouncedHandler
 
 
 @pytest.mark.asyncio
@@ -226,3 +226,16 @@ def test_watcher_move_with_same_src_and_dest(tmp_path, synthetic_loops):
         str(tmp_path / "x.py"), dest_path=str(tmp_path / "x.py"),
     ))
     assert queued == [str(tmp_path / "x.py")]
+
+
+def test_watcher_leading_slash_ignores_only_root_dir(tmp_path):
+    """`/storage` in the ignore list skips `<root>/storage/**` but still
+    lets `lib/app/storage/x.ex` through to the reindex queue."""
+    handler = _DebouncedHandler(
+        on_change=None, debounce_ms=100, ignore_patterns=["/storage", "vendor"],
+        watch_dir=str(tmp_path), loop=None,
+    )
+    assert handler._should_ignore(str(tmp_path / "storage" / "logs" / "x.log"))
+    assert not handler._should_ignore(str(tmp_path / "lib" / "app" / "storage" / "x.ex"))
+    assert handler._should_ignore(str(tmp_path / "lib" / "vendor" / "x.ex"))
+    assert handler._should_ignore(str(tmp_path / "lib" / ".cce" / "x"))

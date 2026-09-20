@@ -13,6 +13,8 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+from context_engine.indexer.ignorefile import IgnoreNames
+
 log = logging.getLogger(__name__)
 
 
@@ -20,7 +22,7 @@ class _DebouncedHandler(FileSystemEventHandler):
     def __init__(self, on_change, debounce_ms, ignore_patterns, watch_dir, loop):
         self._on_change = on_change
         self._debounce_s = debounce_ms / 1000.0
-        self._ignore_set = set(ignore_patterns)
+        self._ignore = IgnoreNames(ignore_patterns)
         self._watch_dir = Path(watch_dir)
         self._loop = loop
         self._pending: dict[str, float] = {}
@@ -33,13 +35,10 @@ class _DebouncedHandler(FileSystemEventHandler):
             rel = Path(path).relative_to(self._watch_dir)
         except ValueError:
             return False
-        for part in rel.parts:
-            if part in self._ignore_set:
-                return True
-            # Always skip CCE's own storage/index files
-            if part == ".cce":
-                return True
-        return False
+        # Always skip CCE's own storage/index files
+        if ".cce" in rel.parts:
+            return True
+        return self._ignore.matches(rel.parts)
 
     def _enqueue(self, path: str) -> None:
         if self._should_ignore(path):

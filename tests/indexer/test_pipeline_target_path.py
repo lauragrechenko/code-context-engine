@@ -92,6 +92,31 @@ async def test_target_path_normal_file_still_indexed(project):
     assert not result.errors
 
 
+@pytest.mark.asyncio
+async def test_target_path_applies_ignore_names_to_parents_and_root_anchor(project):
+    """The single-file path used to check only the file's own name, so
+    `cce index vendor/lib.py` indexed a directory the walk prunes. It now
+    matches the whole relative path, including the root-anchored `/storage`."""
+    project_dir, config = project
+    for rel in ("vendor/lib.py", "storage/cache.py", "lib/app/storage/dets.py"):
+        path = project_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def f():\n    return 1\n")
+
+    for target in ("vendor/lib.py", "storage/cache.py"):
+        result = await run_indexing(config, str(project_dir), target_path=target)
+        assert result.indexed_files == [], f"{target} should have been ignored"
+        assert result.skipped_files == [target]
+        assert not result.errors
+
+    result = await run_indexing(
+        config, str(project_dir), target_path="lib/app/storage/dets.py"
+    )
+    assert result.indexed_files == ["lib/app/storage/dets.py"]
+    assert result.total_chunks > 0
+    assert not result.errors
+
+
 # ── Bug: symlinked project root broke relative_to on reindex ────────────────
 
 @pytest.mark.asyncio

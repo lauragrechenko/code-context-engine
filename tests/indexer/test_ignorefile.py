@@ -7,9 +7,11 @@ import pytest
 
 from context_engine.indexer.ignorefile import (
     CCEIGNORE_FILENAME,
+    IgnoreNames,
     load_ignore_patterns,
     matches_any,
 )
+from context_engine.config import DEFAULT_IGNORE
 from context_engine.indexer.pipeline import _iter_project_files, _SKIP_EXTENSIONS
 
 
@@ -135,3 +137,53 @@ def test_pipeline_no_cceignore_means_no_filter(tmp_path):
         cceignore_patterns=None,
     ))
     assert sorted(f.name for f in files) == ["a.py", "b.log"]
+
+
+# ── IgnoreNames (the name-only `indexer.ignore` list) ──────────────────────
+
+def test_ignore_names_unanchored_matches_any_component():
+    names = IgnoreNames(["node_modules"])
+    assert names.matches(("node_modules",))
+    assert names.matches(("packages", "web", "node_modules", "x.js"))
+    assert not names.matches(("src", "node_modules_shim.js"))
+
+
+def test_ignore_names_leading_slash_matches_only_at_root():
+    names = IgnoreNames(["/storage"])
+    assert names.matches(("storage",))
+    assert names.matches(("storage", "logs", "laravel.log"))
+    assert not names.matches(("lib", "app", "storage", "dets.ex"))
+
+
+def test_ignore_names_drops_empty_entries():
+    names = IgnoreNames(["", "/", "dist"])
+    assert names.anywhere == frozenset({"dist"})
+    assert names.root_only == frozenset()
+    assert not names.matches(())
+
+
+def test_default_ignore_keeps_nested_storage_source_dir():
+    """Regression: `storage` used to be a bare name, so a source directory
+    `lib/<app>/storage/` was pruned at any depth and never indexed."""
+    names = IgnoreNames(DEFAULT_IGNORE)
+    assert not names.matches(("lib", "key_manager", "storage", "dets.ex"))
+    assert names.matches(("storage", "framework", "views", "abc.php"))
+
+
+def test_pipeline_walk_anchors_leading_slash_to_root(tmp_path):
+    p = tmp_path / "proj"
+    (p / "storage").mkdir(parents=True)
+    (p / "storage" / "cache.php").write_text("<?php // compiled\n")
+    (p / "lib" / "app" / "storage").mkdir(parents=True)
+    (p / "lib" / "app" / "storage" / "dets.ex").write_text("defmodule Dets do\nend\n")
+
+    files = list(_iter_project_files(
+        p, ignore_set={"/storage"}, skip_extensions=_SKIP_EXTENSIONS,
+    ))
+    rel = sorted(str(f.relative_to(p)) for f in files)
+    assert rel == ["lib/app/storage/dets.ex"]
+
+    files = list(_iter_project_files(
+        p, ignore_set={"storage"}, skip_extensions=_SKIP_EXTENSIONS,
+    ))
+    assert files == []
